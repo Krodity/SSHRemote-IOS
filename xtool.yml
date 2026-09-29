@@ -1,0 +1,4 @@
+version: 1
+bundleID: com.example.sshremote
+infoPath: Info.plist
+iconPath: Resources/AppIcon.png
