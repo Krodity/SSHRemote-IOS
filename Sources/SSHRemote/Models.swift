@@ -18,11 +18,18 @@ struct Command: Codable, Identifiable, Hashable {
     var action: RemoteAction?
     /// Touchpad tile height in points.
     var padHeight: Double?
+    /// Post a notification with the exit status when the command finishes. iOS-only.
+    var notify: Bool?
+    /// …and put the command's output in it.
+    var notifyOutput: Bool?
+    /// Hold the key down on the host for as long as the button is held:
+    /// press on touch-down, release on lift. iOS-only.
+    var hold: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id, name, command, longPressCommand, showOutput, renderOutputAsMarkdown
         case repeatWhileHeld = "repeat"
-        case downCommand, upCommand, physicalKeyCodes, action, padHeight
+        case downCommand, upCommand, physicalKeyCodes, action, padHeight, notify, notifyOutput, hold
     }
 
     init(_ command: String? = nil, name: String? = nil, repeat: Bool = false, showOutput: Bool = false) {
@@ -46,6 +53,9 @@ struct Command: Codable, Identifiable, Hashable {
         physicalKeyCodes = try? c.decode([Int].self, forKey: .physicalKeyCodes)
         action = try? c.decode(RemoteAction.self, forKey: .action)
         padHeight = try? c.decode(Double.self, forKey: .padHeight)
+        notify = try? c.decode(Bool.self, forKey: .notify)
+        notifyOutput = try? c.decode(Bool.self, forKey: .notifyOutput)
+        hold = try? c.decode(Bool.self, forKey: .hold)
     }
 
     init(action: RemoteAction) {
@@ -64,6 +74,18 @@ struct Command: Codable, Identifiable, Hashable {
     var hasTap: Bool { !(command ?? "").isBlank }
     var hasLongPress: Bool { !(longPressCommand ?? "").isBlank }
     var repeats: Bool { repeatWhileHeld == true }
+
+    /// What a held button sends on press and on release. Explicit
+    /// press/release commands win; otherwise they're split out of the tap
+    /// command. Nil when the button is a plain tap.
+    var holdPair: (down: String, up: String)? {
+        guard hold == true || usesPressRelease else { return nil }
+        let auto = HoldSplit.split(command ?? "")
+        let down = downCommand.flatMap { $0.isBlank ? nil : $0 } ?? auto?.down
+        let up = upCommand.flatMap { $0.isBlank ? nil : $0 } ?? auto?.up
+        guard down != nil || up != nil else { return nil }
+        return (down ?? "", up ?? "")
+    }
     var wantsOutput: Bool { showOutput == true }
 
     var displayText: String {
@@ -74,6 +96,115 @@ struct Command: Codable, Identifiable, Hashable {
     /// escaping as the Android app, and the same caveat: it is not a sandbox.
     func formatted(text: String) -> String {
         (command ?? "").replacingOccurrences(of: "%s", with: text.replacingOccurrences(of: "'", with: "'\\''"))
+    }
+}
+
+/// Splits a one-shot key/click command into its press half and release half,
+/// so a button can hold the key down on the host. Understands ydotool, yk,
+/// xdotool and wtype; anything else (pipes, quotes, scripts) returns nil and
+/// needs explicit press/release commands.
+enum HoldSplit {
+    static func split(_ command: String) -> (down: String, up: String)? {
+        let cmd = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cmd.isEmpty, cmd.rangeOfCharacter(from: CharacterSet(charactersIn: ";&|<>`$'\"\\\n()")) == nil
+        else { return nil }
+        let t = cmd.split(whereSeparator: \.isWhitespace).map(String.init)
+        // Leading VAR=value assignments (DISPLAY=:0 …) ride along on both halves.
+        guard let i = t.firstIndex(where: { !($0.contains("=") && !$0.hasPrefix("-")) }), i + 1 < t.count
+        else { return nil }
+        let prefix = t[...i].joined(separator: " ")
+        let tool = t[i].split(separator: "/").last.map(String.init) ?? t[i]
+        let args = Array(t[(i + 1)...])
+        let pair: (String, String)?
+        switch tool {
+        case "ydotool": pair = ydotool(args)
+        case "yk": pair = yk(args)
+        case "xdotool": pair = xdotool(args)
+        case "wtype": pair = wtype(args)
+        default: pair = nil
+        }
+        return pair.map { ("\(prefix) \($0.0)", "\(prefix) \($0.1)") }
+    }
+
+    /// `key 29:1 20:1 20:0 29:0` → `key 29:1 20:1` / `key 20:0 29:0`;
+    /// `click 0xC0` (press+release) → `click 0x40` / `click 0x80`.
+    private static func ydotool(_ a: [String]) -> (String, String)? {
+        switch a.first {
+        case "key":
+            var opts: [String] = [], pressed: [String] = []
+            var k = 1
+            while k < a.count {
+                if a[k] == "-d" || a[k] == "--key-delay", k + 1 < a.count { opts += [a[k], a[k + 1]]; k += 2; continue }
+                let p = a[k].split(separator: ":")
+                guard p.count == 2, let code = Int(p[0]) else { return nil }
+                if p[1] == "1", !pressed.contains(String(code)) { pressed.append(String(code)) }
+                k += 1
+            }
+            guard !pressed.isEmpty else { return nil }
+            let o = opts.isEmpty ? "" : opts.joined(separator: " ") + " "
+            return ("key \(o)" + pressed.map { "\($0):1" }.joined(separator: " "),
+                    "key \(o)" + pressed.reversed().map { "\($0):0" }.joined(separator: " "))
+        case "click":
+            guard let last = a.last, last.lowercased().hasPrefix("0x"),
+                  let v = Int(last.dropFirst(2), radix: 16), v & 0xC0 == 0xC0 else { return nil }
+            let b = v & 0x0F
+            return (String(format: "click 0x%02X", 0x40 + b), String(format: "click 0x%02X", 0x80 + b))
+        default:
+            return nil
+        }
+    }
+
+    /// `yk ctrl+shift+t` → `yk hold ctrl+shift+t` / `yk release t+shift+ctrl`;
+    /// `yk click right` → `yk mdown right` / `yk mup right`.
+    private static func yk(_ a: [String]) -> (String, String)? {
+        var a = a
+        if a.first == "-d" { a.removeFirst(min(2, a.count)) }
+        guard let first = a.first else { return nil }
+        if first == "click" {
+            let b = a.count > 1 ? a[1] : "left"
+            return ("mdown \(b)", "mup \(b)")
+        }
+        let verbs: Set = ["type", "hold", "release", "dclick", "mdown", "mup", "move", "moveto",
+                          "scroll", "panic", "list", "code", "help", "-h", "--help"]
+        guard !verbs.contains(first) else { return nil }
+        let released = a.reversed().map { $0.split(separator: "+").reversed().joined(separator: "+") }
+        return ("hold " + a.joined(separator: " "), "release " + released.joined(separator: " "))
+    }
+
+    /// `key ctrl+t` → `keydown ctrl+t` / `keyup ctrl+t`; `click 3` → `mousedown 3` / `mouseup 3`.
+    private static func xdotool(_ a: [String]) -> (String, String)? {
+        guard let verb = a.first, verb == "key" || verb == "click" else { return nil }
+        var plain: [String] = [], k = 1
+        while k < a.count {
+            if a[k] == "--clearmodifiers" { k += 1; continue }
+            if a[k].hasPrefix("--") { k += 2; continue }   // --delay N, --window W, --repeat N
+            plain.append(a[k]); k += 1
+        }
+        guard !plain.isEmpty else { return nil }
+        if verb == "click" {
+            guard plain.count == 1 else { return nil }
+            return ("mousedown \(plain[0])", "mouseup \(plain[0])")
+        }
+        return ("keydown " + plain.joined(separator: " "), "keyup " + plain.reversed().joined(separator: " "))
+    }
+
+    /// `-M ctrl -k t -m ctrl` → `-M ctrl -P t` / `-p t -m ctrl`.
+    private static func wtype(_ a: [String]) -> (String, String)? {
+        var mods: [String] = [], keys: [String] = [], k = 0
+        while k < a.count {
+            guard k + 1 < a.count else { return nil }
+            switch a[k] {
+            case "-M": if !mods.contains(a[k + 1]) { mods.append(a[k + 1]) }
+            case "-k", "-P": keys.append(a[k + 1])
+            case "-m", "-p", "-s", "-d": break
+            default: return nil   // literal text can't be held
+            }
+            k += 2
+        }
+        guard !mods.isEmpty || !keys.isEmpty else { return nil }
+        let down = mods.map { "-M \($0)" } + keys.map { "-P \($0)" }
+        let up = keys.reversed().map { "-p \($0)" } + mods.reversed().map { "-m \($0)" }
+        return (down.joined(separator: " "), up.joined(separator: " "))
     }
 }
 

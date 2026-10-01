@@ -478,6 +478,9 @@ struct RemoteButton<Label: View>: View {
     @State private var pressStart = Date()
     @State private var timer: Timer?
     @State private var fired = false
+    /// The in-flight press of a held button; its release waits on it, so a
+    /// quick tap can't land the key-up before the key-down.
+    @State private var holdTask: Task<Void, Never>?
 
     var body: some View {
         // A real Button (not a zero-distance DragGesture) so a swipe that
@@ -499,6 +502,8 @@ struct RemoteButton<Label: View>: View {
                 .contentShape(RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(PressReportingStyle { $0 ? down() : up() })
+        // Leaving the page mid-hold must still let go of the key.
+        .onDisappear { up() }
     }
 
     private func haptic() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
@@ -512,8 +517,8 @@ struct RemoteButton<Label: View>: View {
         guard let c = command else { return }
         haptic()
         if c.action != nil { return }
-        if c.usesPressRelease {
-            if let d = c.downCommand { Task { await model.run(d, on: hostId) } }
+        if let pair = c.holdPair {
+            holdTask = Task { await model.run(pair.down, on: hostId) }
             return
         }
         if c.repeats {
@@ -532,7 +537,7 @@ struct RemoteButton<Label: View>: View {
                     fired = true
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     Task { await model.run(c.longPressCommand ?? "", on: hostId, title: c.displayText,
-                                           showOutput: c.wantsOutput) }
+                                           showOutput: c.wantsOutput, notifying: c) }
                 }
             }
         }
@@ -545,8 +550,12 @@ struct RemoteButton<Label: View>: View {
         timer?.invalidate()
         timer = nil
         if editMode { return }
-        if let c = command, c.usesPressRelease, let u = c.upCommand {
-            Task { await model.run(u, on: hostId) }
+        if let c = command, let pair = c.holdPair {
+            let press = holdTask
+            holdTask = Task {
+                await press?.value
+                await model.run(pair.up, on: hostId)
+            }
         }
     }
 
@@ -554,7 +563,7 @@ struct RemoteButton<Label: View>: View {
     private func tapped() {
         if editMode { onEdit?(); return }
         if let a = command?.action { remoteAction(a); return }
-        guard let c = command, !c.usesPressRelease, !c.repeats, !fired else { return }
+        guard let c = command, c.holdPair == nil, !c.repeats, !fired else { return }
         fire(c)
     }
 
@@ -923,16 +932,18 @@ enum TouchpadSize: Double, CaseIterable, Identifiable {
 struct TouchpadTile: View {
     @EnvironmentObject var model: AppModel
     let hostId: String
-    @AppStorage("mouseSensitivity") private var sensitivity = 1.5
+    @AppStorage("padHints") private var padHints = true
 
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 16).fill(Theme.surface)
-            Pad(model: model, hostId: hostId, sensitivity: sensitivity)
-            Text("tap click · two-finger tap right-click · two fingers scroll")
-                .font(.caption2).foregroundStyle(.gray).multilineTextAlignment(.center)
-                .frame(maxHeight: .infinity, alignment: .bottom).padding(8)
-                .allowsHitTesting(false)
+            Pad(model: model, hostId: hostId)
+            if padHints {
+                Text("tap click · two-finger tap right-click · two fingers scroll")
+                    .font(.caption2).foregroundStyle(.gray).multilineTextAlignment(.center)
+                    .frame(maxHeight: .infinity, alignment: .bottom).padding(8)
+                    .allowsHitTesting(false)
+            }
         }
     }
 }
@@ -1150,6 +1161,7 @@ struct MouseTabView: View {
     @EnvironmentObject var model: AppModel
     let hostId: String
     @AppStorage("mouseSensitivity") private var sensitivity = 1.5
+    @AppStorage("padHints") private var padHints = true
 
     var body: some View {
         VStack(spacing: 10) {
@@ -1160,11 +1172,13 @@ struct MouseTabView: View {
             .padding(.horizontal, 16)
             ZStack {
                 RoundedRectangle(cornerRadius: 16).fill(Theme.surface)
-                Pad(model: model, hostId: hostId, sensitivity: sensitivity)
-                Text("drag to move · tap to click · two-finger tap right-click · two fingers to scroll")
-                    .font(.caption2).foregroundStyle(.gray).multilineTextAlignment(.center)
-                    .frame(maxHeight: .infinity, alignment: .bottom).padding(10)
-                    .allowsHitTesting(false)
+                Pad(model: model, hostId: hostId)
+                if padHints {
+                    Text("drag to move · tap to click · two-finger tap right-click · two fingers to scroll")
+                        .font(.caption2).foregroundStyle(.gray).multilineTextAlignment(.center)
+                        .frame(maxHeight: .infinity, alignment: .bottom).padding(10)
+                        .allowsHitTesting(false)
+                }
             }
             .padding(.horizontal, 16)
             HStack(spacing: 10) {
@@ -1181,7 +1195,9 @@ struct MouseTabView: View {
 private struct Pad: UIViewRepresentable {
     let model: AppModel
     let hostId: String
-    let sensitivity: Double
+    @AppStorage("mouseSensitivity") private var sensitivity = 1.5
+    @AppStorage("scrollSensitivity") private var scrollSensitivity = 1.0
+    @AppStorage("naturalScrolling") private var naturalScrolling = true
 
     func makeUIView(context: Context) -> PadView {
         let v = PadView()
@@ -1190,15 +1206,23 @@ private struct Pad: UIViewRepresentable {
         return v
     }
 
-    func updateUIView(_ v: PadView, context: Context) { v.sensitivity = sensitivity }
+    func updateUIView(_ v: PadView, context: Context) {
+        v.sensitivity = sensitivity
+        v.scrollSensitivity = scrollSensitivity
+        v.naturalScrolling = naturalScrolling
+    }
 }
 
-/// Raw touches, like a laptop trackpad: move, tap, two-finger tap, and
+/// Raw touches, like PC Remote's trackpad: move, tap, two-finger tap, and
 /// two-finger scroll mapped onto the host's mouse commands.
 final class PadView: UIView {
     weak var model: AppModel?
     var hostId = ""
     var sensitivity = 1.5
+    /// Wheel clicks per 14 pt of two-finger travel.
+    var scrollSensitivity = 1.0
+    /// Content follows the fingers (macOS/iOS style); off = classic wheel.
+    var naturalScrolling = true
 
     private var downAt = Date()
     private var moved: CGFloat = 0
@@ -1234,9 +1258,11 @@ final class PadView: UIView {
             let dy = act.map { $0.location(in: self).y - $0.previousLocation(in: self).y }.reduce(0, +) / CGFloat(act.count)
             scrollAcc += dy
             moved += abs(dy)
-            while abs(scrollAcc) >= 14 {
-                let up = scrollAcc > 0
-                scrollAcc -= up ? 14 : -14
+            let step = 14 / CGFloat(max(scrollSensitivity, 0.1))
+            while abs(scrollAcc) >= step {
+                let down = scrollAcc > 0
+                scrollAcc -= down ? step : -step
+                let up = down == naturalScrolling
                 if let c = host.command(up ? .MOUSE_PAN_UP : .MOUSE_PAN_DOWN)?.command {
                     Task { await model.run(c, on: hostId) }
                 }

@@ -147,6 +147,7 @@ struct CommandEditor: View {
     var allowOutput = true
     var onDelete: (() -> Void)?
     let onSave: (Command?) -> Void
+    @AppStorage(CommandNotifier.enabledKey) private var notificationsOn = false
 
     init(title: String, command: Command, pressRelease: Bool = false, allowOutput: Bool = true,
          onDelete: (() -> Void)? = nil, onSave: @escaping (Command?) -> Void) {
@@ -166,16 +167,38 @@ struct CommandEditor: View {
                 }
                 Section {
                     field("Command", bind(\.command))
-                    field("Long-press command (optional)", bind(\.longPressCommand))
-                    Toggle("Repeat while held", isOn: flag(\.repeatWhileHeld))
+                    if !holding {
+                        field("Long-press command (optional)", bind(\.longPressCommand))
+                        Toggle("Repeat while held", isOn: flag(\.repeatWhileHeld))
+                    }
                     if allowOutput { Toggle("Show output", isOn: flag(\.showOutput)) }
                 } header: { Text("On tap") }
-                if pressRelease {
+                if allowOutput {
                     Section {
-                        field("On press", bind(\.downCommand))
-                        field("On release", bind(\.upCommand))
-                    } header: { Text("Press & release (replaces tap)") } footer: {
-                        Text("For holding a key or button down, e.g. ydotool key 42:1 / 42:0.")
+                        Toggle("Notify when finished", isOn: flag(\.notify))
+                        Toggle("Include output", isOn: flag(\.notifyOutput)).disabled(command.notify != true)
+                    } header: { Text("Notification") } footer: {
+                        Text(notificationsOn
+                             ? "Shows ✓ or ✗ with the exit status (and optionally the output) when the tap or long-press command finishes. Tap the notification for the full output."
+                             : "Command notifications are off — turn them on in ⚙ → Settings for this to fire.")
+                    }
+                }
+                if pressRelease {
+                    let auto = HoldSplit.split(command.command ?? "")
+                    Section {
+                        Toggle("Hold on PC while held", isOn: holdBinding)
+                        if holding {
+                            field(auto.map { "On press — auto: \($0.down)" } ?? "On press", bind(\.downCommand))
+                            field(auto.map { "On release — auto: \($0.up)" } ?? "On release", bind(\.upCommand))
+                        }
+                    } header: { Text("Hold") } footer: {
+                        if !holding {
+                            Text("Presses the key (or mouse button) down on the PC when you touch the button and releases it when you let go, instead of a tap. Works out the press and release from a ydotool, yk, xdotool or wtype command.")
+                        } else if auto == nil && command.holdPair == nil {
+                            Text("Can't split this command automatically — fill in On press and On release, e.g. ydotool key 42:1 / 42:0.")
+                        } else {
+                            Text("Leave a field empty to use the auto split shown in it.")
+                        }
                     }
                 }
                 if let onDelete {
@@ -197,6 +220,21 @@ struct CommandEditor: View {
                 }
             }
         }
+    }
+
+    private var holding: Bool { pressRelease && (command.hold == true || command.usesPressRelease) }
+
+    private var holdBinding: Binding<Bool> {
+        Binding(get: { holding }, set: { on in
+            if on {
+                command.hold = true
+                command.repeatWhileHeld = nil
+            } else {
+                command.hold = nil
+                command.downCommand = nil
+                command.upCommand = nil
+            }
+        })
     }
 
     private func field(_ label: String, _ text: Binding<String>) -> some View {

@@ -68,6 +68,7 @@ struct HostListView: View {
     @State private var importing = false
     @State private var pasting = false
     @State private var showKey = false
+    @State private var showSettings = false
 
     var body: some View {
         NavigationStack {
@@ -102,6 +103,7 @@ struct HostListView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Menu {
+                        Button { showSettings = true } label: { Label("Settings", systemImage: "slider.horizontal.3") }
                         Button { showKey = true } label: { Label("This device's SSH key", systemImage: "key") }
                         Button { importing = true } label: { Label("Import settings file", systemImage: "square.and.arrow.down") }
                         Button { pasting = true } label: { Label("Paste settings", systemImage: "doc.on.clipboard") }
@@ -113,6 +115,7 @@ struct HostListView: View {
             }
             .sheet(item: $editing) { h in HostEditView(host: h) }
             .sheet(isPresented: $showKey) { PublicKeyView() }
+            .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $pasting) { PasteImportView() }
             .fileImporter(isPresented: $importing, allowedContentTypes: [.json, .plainText, .data]) { r in
                 guard case .success(let url) = r else { return }
@@ -172,6 +175,71 @@ struct PasteImportView: View {
                 }
             }
             .onAppear { if let s = UIPasteboard.general.string, text.isEmpty { text = s } }
+        }
+    }
+}
+
+/// App-wide input preferences, shared by the Mouse tab and every Touchpad tile.
+struct SettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("mouseSensitivity") private var sensitivity = 1.5
+    @AppStorage("scrollSensitivity") private var scrollSensitivity = 1.0
+    @AppStorage("naturalScrolling") private var naturalScrolling = true
+    @AppStorage("padHints") private var padHints = true
+    @AppStorage(CommandNotifier.enabledKey) private var notificationsOn = false
+    @State private var notificationsDenied = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    VStack(alignment: .leading) {
+                        LabeledContent("Pointer speed", value: String(format: "%.1f×", sensitivity))
+                        Slider(value: $sensitivity, in: 0.5...5, step: 0.1)
+                    }
+                    VStack(alignment: .leading) {
+                        LabeledContent("Scroll speed", value: String(format: "%.2f×", scrollSensitivity))
+                        Slider(value: $scrollSensitivity, in: 0.25...4, step: 0.25)
+                    }
+                    Toggle("Natural scrolling", isOn: $naturalScrolling)
+                    Toggle("Show trackpad hints", isOn: $padHints)
+                } header: {
+                    Text("Trackpad")
+                } footer: {
+                    Text(naturalScrolling
+                         ? "Content follows your fingers: swipe up to scroll down."
+                         : "Classic wheel: swipe up to scroll up.")
+                }
+                Section {
+                    Toggle("Command notifications", isOn: Binding(
+                        get: { notificationsOn },
+                        set: { on in
+                            guard on else { notificationsOn = false; return }
+                            Task {
+                                let ok = await CommandNotifier.shared.requestPermission()
+                                notificationsOn = ok
+                                notificationsDenied = !ok
+                            }
+                        }))
+                } header: {
+                    Text("Notifications")
+                } footer: {
+                    Text(notificationsDenied
+                         ? "iOS has notifications turned off for SSH Remote. Allow them in the iPhone's Settings → Notifications → SSH Remote, then try again."
+                         : "Lets buttons report when their command finishes. Turn it on per button: edit mode → edit a button → Notify when finished (optionally with its output).")
+                }
+                Section {
+                    Button("Reset to defaults") {
+                        sensitivity = 1.5
+                        scrollSensitivity = 1.0
+                        naturalScrolling = true
+                        padHints = true
+                    }
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
     }
 }

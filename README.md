@@ -560,9 +560,16 @@ Every button, built-in or custom, behaves like a real key:
 - **Long-press command** (optional) runs instead when held for half a second.
 - **Repeat while held** fires once, pauses, then repeats steadily until you let go.
   This suits volume and arrows.
-- **Press & release** replaces tap: *On press* runs when your finger goes down and
-  *On release* when it comes up, for holding a key or mouse button down
-  (e.g. `ydotool key 42:1` / `ydotool key 42:0` for Shift).
+- **Hold on PC while held** replaces tap: the key (or mouse button) goes down on
+  the computer when your finger touches the button and comes up when you let go.
+  The press and release are worked out from the button's normal command:
+  `ydotool key 29:1 20:1 20:0 29:0` → `ydotool key 29:1 20:1` / `ydotool key 20:0 29:0`,
+  `ydotool click 0xC0` → `0x40` / `0x80`, `xdotool key` → `keydown`/`keyup`,
+  `xdotool click N` → `mousedown`/`mouseup`, `wtype -k X` → `-P X` / `-p X`.
+  For anything else (scripts, pipes, quoted text) fill in *On press* and
+  *On release* yourself; a filled field always wins over the automatic split.
+  The release always waits for the press, so a quick tap can't leave a key stuck,
+  and switching pages mid-hold lets go of the key.
 - **Show output** opens the command's output (stdout, stderr tagged, exit status)
   in a sheet.
 
@@ -576,6 +583,18 @@ icon, so an unused slot doesn't clutter the remote.
 
 Drag to move, tap to left-click, two-finger tap to right-click, and drag with two
 fingers to scroll. The slider sets pointer speed (shared with every Touchpad tile).
+More trackpad options live under **⚙ → Settings** on the host list: pointer speed,
+scroll speed, natural scrolling on/off, and a toggle to hide the hint text on the pad.
+
+### Command notifications
+
+Turn on **⚙ → Settings → Command notifications** (iOS asks for permission once), then
+in edit mode open any button and switch on **Notify when finished**, optionally with
+**Include output**. When that button's tap or long-press command finishes you get a
+banner (also while the app is open): ✓/✗ with the exit status, the host name, and the
+run time, or the first 1000 characters of output. Tap the banner to see the full output.
+Repeat-while-held buttons never notify. Commands only finish while the app is running,
+so a command still running when you leave the app may not report back.
 Movements are merged while a command is in flight, so a slow link lags slightly
 instead of queueing seconds of movement.
 
@@ -884,7 +903,7 @@ can replace it later.
 |---|---|
 | Hosts, commands, buttons, pages, tab order, trusted host keys | `hosts.json` in the app's Application Support folder, with iOS file protection |
 | Passwords (one per host) and the device private key | iOS Keychain, *this device only*, available after first unlock; not synced or backed up |
-| Small preferences (mouse speed, Files view mode, last folder per host) | `UserDefaults` |
+| Small preferences (pointer/scroll speed, natural scrolling, pad hints, Files view mode, last folder per host) | `UserDefaults` |
 | Downloaded files | The app's Caches folder (iOS may clear it) |
 
 New fields (`tabOrder`, `hiddenTabs`, `action`, `padHeight`) are optional, so

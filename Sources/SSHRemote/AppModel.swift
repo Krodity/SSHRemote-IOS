@@ -61,6 +61,8 @@ final class AppModel: ObservableObject {
             Task { @MainActor in self?.networkChanged(path) }
         }
         pathMonitor.start(queue: DispatchQueue(label: "sshremote.path"))
+        CommandNotifier.shared.install()
+        CommandNotifier.shared.onOpen = { [weak self] in self?.output = $0 }
     }
 
     // Mouse deltas pile up while a move command is in flight and go out as
@@ -237,15 +239,23 @@ final class AppModel: ObservableObject {
     // ── running commands ─────────────────────────────────────────────────────
     /// Runs `command` on the host, reconnecting once if the session died.
     @discardableResult
-    func run(_ command: String, on id: String, title: String? = nil, showOutput: Bool = false) async -> CommandResult? {
+    func run(_ command: String, on id: String, title: String? = nil, showOutput: Bool = false,
+             notifying button: Command? = nil) async -> CommandResult? {
         guard !command.isBlank else { return nil }
+        let started = Date()
+        func notify(_ r: CommandResult?, _ error: String? = nil) {
+            guard let button else { return }
+            CommandNotifier.shared.post(for: button, command: command, host: host(id)?.title ?? "",
+                                        result: r, error: error, elapsed: Date().timeIntervalSince(started))
+        }
         for attempt in 0..<2 {
             guard let c = await connect(id) else {
-                if case .failed(let why) = state(of: id) { toast = why }
+                if case .failed(let why) = state(of: id) { toast = why; notify(nil, why) } else { notify(nil) }
                 return nil
             }
             do {
                 let r = try await c.run(command)
+                notify(r)
                 if showOutput {
                     output = OutputSheet(title: title ?? command, command: command, result: r)
                 } else if !r.ok {
@@ -258,9 +268,11 @@ final class AppModel: ObservableObject {
                 continue
             } catch {
                 toast = SSHConnection.describe(error)
+                notify(nil, toast)
                 return nil
             }
         }
+        notify(nil, "Not connected")
         return nil
     }
 
@@ -288,7 +300,7 @@ final class AppModel: ObservableObject {
     private let fileSlots = AsyncSemaphore(6)
 
     func run(_ cmd: Command, on id: String) async {
-        await run(cmd.command ?? "", on: id, title: cmd.displayText, showOutput: cmd.wantsOutput)
+        await run(cmd.command ?? "", on: id, title: cmd.displayText, showOutput: cmd.wantsOutput, notifying: cmd)
     }
 
     func mouseMove(dx: Double, dy: Double, on id: String) {
